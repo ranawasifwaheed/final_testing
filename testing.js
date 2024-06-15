@@ -18,10 +18,10 @@ const activeClients = {};
 
 app.get('/initialize-client', async (req, res) => {
     const { clientId } = req.query;
-    const secretKey = req.query.secretKey;
-    if (!secretKey || secretKey !== process.env.SECRET_KEY) {
-        return res.status(401).json({ error: 'Unauthorized. Invalid secret key.' });
-    }
+    // const secretKey = req.query.secretKey;
+    // if (!secretKey || secretKey !== process.env.SECRET_KEY) {
+    //     return res.status(401).json({ error: 'Unauthorized. Invalid secret key.' });
+    // }
 
     try {
         const existingClient = await prisma.qRCode.findFirst({
@@ -51,7 +51,7 @@ app.get('/initialize-client', async (req, res) => {
             puppeteer: {
                 headless: true,
                // args: ["--no-sandbox",'--proxy-server=147.185.238.169:50002']
-                // args: ["--no-sandbox",'--proxy-server=46.166.137.38:31499']
+                args: ["--no-sandbox",'--proxy-server=46.166.137.38:31499']
             }
         });
 
