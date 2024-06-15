@@ -206,5 +206,5 @@ app.get('/logout', (req, res, next) => {
 });
 
 app.listen(port, () => {
-    console.log(`Server is running on http://localhost:${port}`);
+    console.log(`Server is running on http://207.244.239.151:${port}`);
 });
