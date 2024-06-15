@@ -1,0 +1,29 @@
+// schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+
+model QRCode {
+  id           Int      @id @default(autoincrement())
+  clientId     String
+  qrCode       String
+  status       Int      @default(0)
+  phone_number String   @default("none")
+  createdAt    DateTime @default(now())
+}
+
+model MessageLog {
+  id           Int      @id @default(autoincrement())
+  clientId     String
+  phoneNumber  String
+  message      String
+  createdAt    DateTime @default(now())
+}
