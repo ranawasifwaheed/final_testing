@@ -9,7 +9,7 @@ const cors = require('cors');
 const fs = require('fs');
 const mysql = require('mysql2');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 781;
 
 // MySQL connection setup
 const db = mysql.createConnection({
@@ -310,7 +310,7 @@ const deleteFileWithRetries = (filePath, attempts = 5) => {
     });
 };
 
-// Start the Express server
+
 app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+    console.log(`Server is running on http://207.244.239.151:${port}`);
 });
