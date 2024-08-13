@@ -1,15 +1,34 @@
+require('dotenv').config(); // Add this at the top of your file
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const express = require('express');
 const bodyParser = require('body-parser');
 const qr = require('qr-image');
-const { PrismaClient } = require("./generated/client");
-const prisma = new PrismaClient();
 const cors = require('cors');
+const fs = require('fs');
+const mysql = require('mysql2');
 const app = express();
-const port = process.env.PORT || 781;
+const port = process.env.PORT || 3000;
+
+// MySQL connection setup
+const db = mysql.createConnection({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME
+});
+
+db.connect((err) => {
+    if (err) {
+        console.error('Error connecting to MySQL:', err.stack);
+        return;
+    }
+    console.log('Connected to MySQL as id ' + db.threadId);
+});
+
 app.use(cors({
-    origin: '', 
+    origin: '*', 
     methods: ['GET', 'POST']
 }));
 app.use(bodyParser.json());
@@ -18,25 +37,8 @@ const activeClients = {};
 
 app.get('/initialize-client', async (req, res) => {
     const { clientId } = req.query;
-    const secretKey = req.query.secretKey;
-    if (!secretKey || secretKey !== process.env.SECRET_KEY) {
-        return res.status(401).json({ error: 'Unauthorized. Invalid secret key.' });
-    }
 
     try {
-        const existingClient = await prisma.qRCode.findFirst({
-            where: { clientId, status: 1 },
-        });
-
-        if (existingClient) {
-            res.status(400).json({ error: `Client ${clientId} already initialized` });
-            return;
-        }
-
-        const existingQRCode = await prisma.qRCode.findFirst({
-            where: { clientId },
-        });
-
         const client = new Client({
             qrMaxRetries: 1,
             authStrategy: new LocalAuth({ clientId: clientId }),
@@ -44,80 +46,144 @@ app.get('/initialize-client', async (req, res) => {
             webVersion: "2.2412.54",
             webVersionCache: {
                 type: "remote",
-                remotePath:
-                    "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html",
+                remotePath: "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html",
             },
-     
             puppeteer: {
                 headless: true,
-               // args: ["--no-sandbox",'--proxy-server=147.185.238.169:50002']
-                args: ["--no-sandbox",'--proxy-server=46.166.137.38:31499']
+                // args: ["--no-sandbox",'--proxy-server=46.166.137.38:31499']
             }
         });
 
-        client.initialize([clientId]);
+        client.initialize();
 
-        let updatedQRCode;
-
-        client.on('qr', async (qrCode) => {
-            if (existingQRCode) {
-                updatedQRCode = await prisma.qRCode.update({
-                    where: { id: existingQRCode.id },
-                    data: { qrCode }
-                });
-            } else {
-                updatedQRCode = await prisma.qRCode.create({
-                    data: { clientId, qrCode, status: 0 }
-                });
-            }
-
+        client.on('qr', (qrCode) => {
             console.log(`QR RECEIVED for ${clientId}`, qrCode);
             const qrImage = qr.image(qrCode, { type: 'png' });
             qrImage.pipe(res, { end: true });
         });
 
-        client.on('ready', async () => {
-            const user = client.info.me.user;
-            console.log('User:', user);
+        client.on('ready', () => {
             console.log(`Client is ready for ${clientId}`);
-            await prisma.qRCode.update({
-                where: { id: updatedQRCode.id },
-                data: { status: 1, phone_number: user }
+
+            client.on('message', (message) => {
+                const clientId = message.from;
+                const number = message.to;
+                const text = message.body;
+
+                // Log the message details to the MySQL database
+                db.query(
+                    'INSERT INTO message_logs (clientId, number, message) VALUES (?, ?, ?)',
+                    [clientId, number, text],
+                    (err, results) => {
+                        if (err) {
+                            console.error('Error inserting message into MySQL:', err);
+                        } else {
+                            console.log('Message logged successfully');
+                        }
+                    }
+                );
             });
+
+            client.getContacts().then(contacts => {
+                const extractedData = contacts.map(contact => {
+                    if (contact.isGroup) {
+                        return {
+                            name: contact.name,
+                            contactNumber: null,
+                            type: 'Group'
+                        };
+                    } else {
+                        return {
+                            name: contact.name,
+                            contactNumber: contact.id.user,
+                            type: 'Private'
+                        };
+                    }
+                });
+
+                extractedData.forEach(contact => {
+                    const query = `INSERT INTO contacts (clientId, name, contactNumber, type) VALUES (?, ?, ?, ?)`;
+                    db.query(query, [clientId, contact.name, contact.contactNumber, contact.type], (err, results) => {
+                        if (err) {
+                            console.error('Error inserting contact data into MySQL:', err.stack);
+                        } else {
+                            console.log('Contact data inserted successfully into MySQL');
+                        }
+                    });
+                });
+            });
+
+            client.getChats().then(chats => {
+                const extractedData = chats.map(chat => {
+                    if (chat.isGroup) {
+                        return {
+                            name: chat.name,
+                            contactNumber: null,
+                            type: 'Group'
+                        };
+                    } else {
+                        return {
+                            name: chat.name,
+                            contactNumber: chat.id.user,
+                            type: 'Private'
+                        };
+                    }
+                });
+
+                extractedData.forEach(chatData => {
+                    const query = `INSERT INTO chats (clientId, name, contactNumber, type) VALUES (?, ?, ?, ?)`;
+                    db.query(query, [clientId, chatData.name, chatData.contactNumber, chatData.type], (err, results) => {
+                        if (err) {
+                            console.error('Error inserting chat data into MySQL:', err.stack);
+                        } else {
+                            console.log('Chat data inserted successfully into MySQL');
+                        }
+                    });
+                });
+            }).catch(error => {
+                console.error('Error fetching chats:', error);
+            });
+
             activeClients[clientId] = client;
+
+            const query = `INSERT INTO clients (clientId, status) VALUES (?, 'ready') 
+                           ON DUPLICATE KEY UPDATE status='ready'`;
+            db.query(query, [clientId], (err, results) => {
+                if (err) {
+                    console.error('Error updating client status in MySQL:', err.stack);
+                } else {
+                    console.log('Client status updated successfully in MySQL');
+                }
+            });
         });
 
         client.on('authenticated', () => {
-            console.error(clientId + ' authenticated');
+            console.log(clientId + ' authenticated');
         });
 
         client.on('auth_failure', () => {
-            console.log('auth_failure', );
+            console.log('auth_failure');
         });
 
-        client.on('disconnected', async () => {
-            await prisma.qRCode.update({
-                where: { id: updatedQRCode.id },
-                data: { status: 0 }
-            });
+        client.on('disconnected', () => {
             delete activeClients[clientId];
+            const query = `UPDATE clients SET status = 'logout' WHERE clientId = ?`;
+            db.query(query, [clientId], (err, results) => {
+                if (err) {
+                    console.error('Error updating client status in MySQL:', err.stack);
+                } else {
+                    console.log('Client status updated to disconnected in MySQL');
+                }
+            });
         });
-
-        
-
     } catch (error) {
         console.error("Error:", error);
         res.status(500).json({ error: "Internal server error" });
     }
-})
+});
 
-
-app.get('/status', (req, res, next) => {
+app.get('/status', (req, res) => {
     const requestedClientId = req.query.clientId;
-    const secretKey = req.query.secretKey;
-    if (!secretKey || secretKey !== process.env.SECRET_KEY) {
-        return res.status(401).json({ error: 'Unauthorized. Invalid secret key.' });
-    }
 
     if (!requestedClientId) {
         res.status(400).json({ error: 'clientId is required in the query parameters' });
@@ -132,79 +198,119 @@ app.get('/status', (req, res, next) => {
     }
 });
 
-app.get('/message', async (req, res, next) => {
+app.get('/message', (req, res) => {
     const requestedClientId = req.query.clientId;
     const number = req.query.to;
     const text = req.query.message;
-    const clientPhoneNumber = req.query.clientPhoneNumber;
-    const secretKey = req.query.secretKey;
-    if (!secretKey || secretKey !== process.env.SECRET_KEY) {
-        return res.status(401).json({ error: 'Unauthorized. Invalid secret key.' });
-    }
-    
 
-    if (!requestedClientId || !number || !text || !clientPhoneNumber) {
-        res.status(400).json({ error: 'clientId, number, text and clientPhoneNumber are required in the query parameters' });
+    if (!requestedClientId || !number || !text) {
+        res.status(400).json({ error: 'clientId, number, and text are required in the query parameters' });
         return;
     }
+
     const client = activeClients[requestedClientId];
     if (client) {
-        const user = client.info.me.user
-        if (user !== clientPhoneNumber) {
-            console.log(`User and client phone number do not match for ${requestedClientId}`);
-            res.status(400).json({ error: 'User and client phone number do not match' });
-            return;
-        
-    }
         const chatId = number.substring(1) + "@c.us";
-        client.sendMessage(chatId, text);
-
-        try {
-            await prisma.messageLog.create({
-                data: {
-                    clientId: requestedClientId,
-                    phoneNumber: number,
-                    message: text,
-                },
+        
+        client.sendMessage(chatId, text).then(() => {
+            const query = 'INSERT INTO message_logs (clientId, number, message) VALUES (?, ?, ?)';
+            const values = [requestedClientId, number, text];
+            
+            db.query(query, values, (err, results) => {
+                if (err) {
+                    console.error('Error logging message to MySQL:', err);
+                    res.status(500).json({ error: 'Failed to log message' });
+                } else {
+                    console.log('Message logged successfully');
+                    res.status(200).json({ message: `Client ${requestedClientId} sent message successfully` });
+                }
             });
-            res.status(200).json({ message: `Client ${requestedClientId} sent message successfully` });
+        }).catch(error => {
+            console.error('Error sending message:', error);
+            res.status(500).json({ error: 'Failed to send message' });
+        });
+    } else {
+        res.status(404).json({ error: `Client ${requestedClientId} not found or not ready` });
+    }
+});
+
+app.get('/set-status', async (req, res) => {
+    const { clientId, statusMessage } = req.query;
+
+    if (!clientId || !statusMessage) {
+        res.status(400).json({ error: 'clientId and statusMessage are required in the query parameters' });
+        return;
+    }
+
+    const client = activeClients[clientId];
+    if (client) {
+        await client.setStatus(statusMessage);
+        res.status(200).json({ message: `Status set to "${statusMessage}" for client ${clientId}` });
+    } else {
+        res.status(404).json({ error: `Client ${clientId} not found or not ready` });
+    }
+});
+
+
+
+app.get('/logout', async (req, res) => {
+    const { clientId } = req.query;
+
+    if (!clientId) {
+        return res.status(400).json({ error: 'clientId is required in the query parameters' });
+    }
+
+    const filePath = `.wwebjs_auth/session-${clientId}/Default/chrome_debug.log`;
+
+    const client = activeClients[clientId];
+
+    if (client) {
+        try {
+            await client.logout();
+            console.log(`Client ${clientId} logged out successfully`);
+
+            delete activeClients[clientId];
+
+            const logoutQuery = `UPDATE clients SET status = 'logged_out' WHERE clientId = ?`;
+            db.query(logoutQuery, [clientId], (err, results) => {
+                if (err) {
+                    console.error('Error updating client status in MySQL:', err.stack);
+                } else {
+                    console.log('Client status updated successfully in MySQL');
+                }
+            });
+
+            // Wait for a short period before attempting to delete the file
+            setTimeout(() => {
+                deleteFileWithRetries(filePath);
+            }, 3000); // Wait for 3 seconds
+
+            res.status(200).json({ message: `Client ${clientId} was logged out and file deletion is in progress` });
         } catch (error) {
-            console.error("Error saving message log:", error);
-            res.status(500).json({ error: 'Internal server error' });
+            console.error('Error during logout:', error);
+            res.status(500).json({ error: 'Failed to log out client' });
         }
     } else {
-        res.status(404).json({ error: `Client ${requestedClientId} not found or not ready` });
+        res.status(404).json({ error: `Client ${clientId} not found` });
     }
 });
 
+const deleteFileWithRetries = (filePath, attempts = 5) => {
+    fs.unlink(filePath, (err) => {
+        if (err) {
+            if (err.code === 'EBUSY' && attempts > 0) {
+                console.error(`File is busy. Retrying deletion... Attempts left: ${attempts}`);
+                setTimeout(() => deleteFileWithRetries(filePath, attempts - 1), 1000 * (6 - attempts)); // Exponential backoff
+            } else {
+                console.error('Failed to delete file:', err);
+            }
+        } else {
+            console.log('File deleted successfully');
+        }
+    });
+};
 
-
-app.get('/logout', (req, res, next) => {
-    const requestedClientId = req.query.clientId;
-
-    if (!requestedClientId) {
-        res.status(400).json({ error: 'clientId is required in the query parameters' });
-        return;
-    }
-
-    const client = activeClients[requestedClientId];
-    console.log(client);
-    
-    if (client) {
-        client.on('logout', (reason) => {
-            // client.destroy();
-            console.log(`Client for ${requestedClientId} was logged out`, reason);
-            delete activeClients[requestedClientId];
-            client.initialize()
-
-        });
-    
-        res.status(200).json({ message: `Client ${requestedClientId} was logged out` });
-    } else {
-        res.status(404).json({ error: `Client ${requestedClientId} not found or not ready` });
-    }
-});
-
+// Start the Express server
 app.listen(port, () => {
-    console.log(`Server is running on http://207.244.239.151:${port}`);
+    console.log(`Server is running on port ${port}`);
 });
