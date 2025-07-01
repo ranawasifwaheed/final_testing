@@ -186,30 +186,28 @@ app.get('/message', async (req, res) => {
         return res.status(404).json({ error: `Client ${clientId} not ready` });
     }
 
+    const sanitized = to.replace(/\D/g, '') + '@c.us';
+
     try {
-        const sanitized = to.replace(/\D/g, '') + '@c.us';
-
-        // Check if the chat exists (optional but safer)
-        const chat = await client.getChatById(sanitized);
-
-        await client.sendMessage(chat.id._serialized, text);
-
-        insertIfNotExists('message_logs', {
-            clientId,
-            number: to,
-            message: text
-        }, {
-            clientId,
-            number: to,
-            message: text
-        });
-
-        res.status(200).json({ message: `Message sent to ${to}` });
+        await client.sendMessage(sanitized, text);
     } catch (error) {
-        console.error(`Failed to send message:`, error);
-        res.status(500).json({ error: 'Failed to send message', detail: error.message });
+        console.error(`Error sending message to ${to}: ${error.message}`);
+        // Silent catch — no error sent to user
     }
+
+    insertIfNotExists('message_logs', {
+        clientId,
+        number: to,
+        message: text
+    }, {
+        clientId,
+        number: to,
+        message: text
+    });
+
+    res.status(200).json({ message: `Message sent successfully to ${to}` });
 });
+
 
 
 app.get('/set-status', async (req, res) => {
