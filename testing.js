@@ -13,7 +13,6 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 781;
 
-// MySQL connection setup
 const db = mysql.createConnection({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -29,13 +28,11 @@ db.connect((err) => {
     console.log('Connected to MySQL as id ' + db.threadId);
 });
 
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST']
-}));
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(bodyParser.json());
 
 const activeClients = {};
+const readyClients = {}; // Track clients that are fully ready
 
 const insertIfNotExists = (table, conditions, values) => {
     const conditionString = Object.keys(conditions).map(key => `${key} = ?`).join(' AND ');
@@ -43,45 +40,36 @@ const insertIfNotExists = (table, conditions, values) => {
     const conditionValues = Object.values(conditions);
 
     db.query(query, conditionValues, (err, results) => {
-        if (err) {
-            console.error(`Error checking for existing entry in ${table}:`, err.stack);
-            return;
-        }
+        if (err) return console.error(`Error checking entry in ${table}:`, err.stack);
 
         if (results[0].count === 0) {
             const insertQuery = `INSERT INTO ${table} (${Object.keys(values).join(', ')}) VALUES (${Object.keys(values).map(() => '?').join(', ')})`;
-            db.query(insertQuery, Object.values(values), (err, results) => {
-                if (err) {
-                    console.error(`Error inserting data into ${table}:`, err.stack);
-                } else {
-                    console.log(`Data inserted successfully into ${table}`);
-                }
+            db.query(insertQuery, Object.values(values), (err) => {
+                if (err) console.error(`Insert error into ${table}:`, err.stack);
+                else console.log(`Data inserted into ${table}`);
             });
         } else {
-            console.log(`Entry already exists in ${table}, skipping insert.`);
+            console.log(`Entry exists in ${table}, skipping.`);
         }
     });
 };
 
 app.get('/initialize-client', async (req, res) => {
     const { clientId } = req.query;
-
-    if (!clientId) {
-        return res.status(400).json({ error: 'clientId is required in the query parameters' });
-    }
+    if (!clientId) return res.status(400).json({ error: 'clientId is required' });
 
     try {
         const client = new Client({
             qrMaxRetries: 1,
             authStrategy: new LocalAuth({
                 clientId: clientId,
-                dataPath: path.join(__dirname, 'sessions', clientId) // Store the session inside 'sessions/clientId' folder
+                dataPath: path.join(__dirname, 'sessions', clientId)
             }),
             restartOnAuthFail: true,
             puppeteer: {
                 headless: true,
                 timeout: 120000,
-                args: ["--no-sandbox",'--proxy-server=46.166.137.38:31499']
+                args: ["--no-sandbox", '--proxy-server=46.166.137.38:31499']
             }
         });
 
@@ -94,7 +82,9 @@ app.get('/initialize-client', async (req, res) => {
         });
 
         client.on('ready', () => {
-            console.log(`Client is ready for ${clientId}`);
+            console.log(`Client ready: ${clientId}`);
+            readyClients[clientId] = true;
+            activeClients[clientId] = client;
 
             client.on('message', (message) => {
                 const logMessage = {
@@ -103,137 +93,127 @@ app.get('/initialize-client', async (req, res) => {
                     message: message.body
                 };
 
-                insertIfNotExists('message_logs', { clientId: logMessage.clientId, number: logMessage.number, message: logMessage.message }, logMessage);
+                insertIfNotExists('message_logs', {
+                    clientId: logMessage.clientId,
+                    number: logMessage.number,
+                    message: logMessage.message
+                }, logMessage);
             });
 
             client.getContacts().then(contacts => {
-                const extractedData = contacts.map(contact => ({
-                    name: contact.name,
-                    contactNumber: contact.isGroup ? null : contact.id.user,
-                    type: contact.isGroup ? 'Group' : 'Private'
-                }));
-
-                console.log('Extracted contacts data:', extractedData);
-
-                extractedData.forEach(contact => {
-                    insertIfNotExists('contacts', {
+                contacts.forEach(contact => {
+                    const data = {
                         clientId,
                         name: contact.name,
-                        contactNumber: contact.contactNumber,
-                        type: contact.type
-                    }, {
-                        clientId,
-                        name: contact.name,
-                        contactNumber: contact.contactNumber,
-                        type: contact.type
-                    });
+                        contactNumber: contact.isGroup ? null : contact.id.user,
+                        type: contact.isGroup ? 'Group' : 'Private'
+                    };
+                    insertIfNotExists('contacts', data, data);
                 });
-            }).catch(error => {
-                console.error('Error fetching contacts:', error);
-            });
+            }).catch(err => console.error('Contacts error:', err));
 
             client.getChats().then(chats => {
-                const extractedData = chats.map(chat => ({
-                    name: chat.name,
-                    contactNumber: chat.isGroup ? null : chat.id.user,
-                    type: chat.isGroup ? 'Group' : 'Private'
-                }));
-
-                console.log('Extracted chats data:', extractedData);
-
-                extractedData.forEach(chatData => {
-                    insertIfNotExists('chats', {
+                chats.forEach(chat => {
+                    const data = {
                         clientId,
-                        name: chatData.name,
-                        contactNumber: chatData.contactNumber,
-                        type: chatData.type
-                    }, {
-                        clientId,
-                        name: chatData.name,
-                        contactNumber: chatData.contactNumber,
-                        type: chatData.type
-                    });
+                        name: chat.name,
+                        contactNumber: chat.isGroup ? null : chat.id.user,
+                        type: chat.isGroup ? 'Group' : 'Private'
+                    };
+                    insertIfNotExists('chats', data, data);
                 });
-            }).catch(error => {
-                console.error('Error fetching chats:', error);
-            });
+            }).catch(err => console.error('Chats error:', err));
 
-            activeClients[clientId] = client;
-            const phoneNumber = client.info.wid.user;
-
-            insertIfNotExists('clients', { clientId }, { clientId, phonenumber: phoneNumber, status: 'ready' });
+            const phoneNumber = client.info?.wid?.user || null;
+            if (phoneNumber) {
+                insertIfNotExists('clients', { clientId }, {
+                    clientId,
+                    phonenumber: phoneNumber,
+                    status: 'ready'
+                });
+            }
         });
 
         client.on('authenticated', () => {
             console.log(`${clientId} authenticated`);
         });
 
-        client.on('auth_failure', (message) => {
+        client.on('auth_failure', message => {
             console.error('Authentication failed:', message);
         });
 
-        client.on('disconnected', (reason) => {
+        client.on('disconnected', reason => {
+            console.warn(`Client ${clientId} disconnected: ${reason}`);
             delete activeClients[clientId];
-            db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId], (err, results) => {
-                if (err) {
-                    console.error('Error updating client status in MySQL:', err.stack);
-                } else {
-                    console.log('Client status updated to disconnected in MySQL');
-                }
+            delete readyClients[clientId];
+
+            db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId], (err) => {
+                if (err) console.error('MySQL update error on disconnect:', err.stack);
+                else console.log('Client status set to logged_out in DB');
             });
         });
+
+        client.on('change_state', state => {
+            console.log(`Client ${clientId} state changed: ${state}`);
+        });
+
     } catch (error) {
-        console.error("Error:", error);
+        console.error("Error initializing client:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 });
 
 app.get('/status', (req, res) => {
     const { clientId } = req.query;
+    if (!clientId) return res.status(400).json({ error: 'clientId is required' });
 
-    if (!clientId) {
-        return res.status(400).json({ error: 'clientId is required in the query parameters' });
+    if (activeClients[clientId] && readyClients[clientId]) {
+        return res.status(200).json({ message: `Client ${clientId} is ready` });
     }
-
-    const client = activeClients[clientId];
-    if (client) {
-        res.status(200).json({ message: `Client ${clientId} is ready` });
-    } else {
-        res.status(404).json({ error: `Client ${clientId} not found or not ready` });
-    }
+    return res.status(404).json({ error: `Client ${clientId} not found or not ready` });
 });
 
 app.get('/message', (req, res) => {
-    const { clientId, to: number, message: text } = req.query;
-
-    if (!clientId || !number || !text) {
-        return res.status(400).json({ error: 'clientId, number, and message are required in the query parameters' });
+    const { clientId, to, message: text } = req.query;
+    if (!clientId || !to || !text) {
+        return res.status(400).json({ error: 'clientId, number, and message are required' });
     }
 
     const client = activeClients[clientId];
-    if (client) {
-        const chatId = number.substring(1) + "@c.us";
+
+    if (client && readyClients[clientId] && client.info && client.info.wid) {
+        const sanitized = to.replace(/\D/g, '');
+        const chatId = `${sanitized}@c.us`;
+
         client.sendMessage(chatId, text).then(() => {
-            insertIfNotExists('message_logs', { clientId, number, message: text }, { clientId, number, message: text });
-            res.status(200).json({ message: `Client ${clientId} sent message successfully` });
-        }).catch(error => {
-            console.error('Error sending message:', error);
-            res.status(500).json({ error: 'Failed to send message' });
+            insertIfNotExists('message_logs', {
+                clientId,
+                number: to,
+                message: text
+            }, {
+                clientId,
+                number: to,
+                message: text
+            });
+
+            res.status(200).json({ message: `Message sent to ${to} by client ${clientId}` });
+        }).catch(err => {
+            console.error(`Send error to ${chatId}:`, err);
+            res.status(500).json({ error: 'Failed to send message', detail: err.message });
         });
     } else {
-        res.status(404).json({ error: `Client ${clientId} not found or not ready` });
+        return res.status(404).json({ error: `Client ${clientId} not ready or initialized` });
     }
 });
 
 app.get('/set-status', async (req, res) => {
     const { clientId, statusMessage } = req.query;
-
     if (!clientId || !statusMessage) {
-        return res.status(400).json({ error: 'clientId and statusMessage are required in the query parameters' });
+        return res.status(400).json({ error: 'clientId and statusMessage are required' });
     }
 
     const client = activeClients[clientId];
-    if (client) {
+    if (client && readyClients[clientId]) {
         try {
             await client.setStatus(statusMessage);
             res.status(200).json({ message: `Status set to "${statusMessage}" for client ${clientId}` });
@@ -248,29 +228,23 @@ app.get('/set-status', async (req, res) => {
 
 app.get('/logout', async (req, res) => {
     const { clientId } = req.query;
-
-    if (!clientId) {
-        return res.status(400).json({ error: 'clientId is required in the query parameters' });
-    }
+    if (!clientId) return res.status(400).json({ error: 'clientId is required' });
 
     const client = activeClients[clientId];
     if (client) {
         try {
             await client.logout();
-            console.log(`Client ${clientId} logged out successfully`);
             delete activeClients[clientId];
+            delete readyClients[clientId];
 
-            db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId], (err, results) => {
-                if (err) {
-                    console.error('Error updating client status in MySQL:', err.stack);
-                } else {
-                    console.log('Client status updated successfully in MySQL');
-                }
+            db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId], (err) => {
+                if (err) console.error('MySQL update error:', err.stack);
+                else console.log(`Client ${clientId} status updated to logged_out`);
             });
 
             res.status(200).json({ message: `Client ${clientId} logged out` });
         } catch (error) {
-            console.error('Error logging out client:', error);
+            console.error('Logout error:', error);
             res.status(500).json({ error: 'Failed to log out client' });
         }
     } else {
@@ -279,5 +253,5 @@ app.get('/logout', async (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`Server is running on http://207.244.239.151:${port}`);
+    console.log(`Server running on http://207.244.239.151:${port}`);
 });
