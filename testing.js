@@ -173,38 +173,44 @@ app.get('/status', (req, res) => {
     return res.status(404).json({ error: `Client ${clientId} not found or not ready` });
 });
 
-app.get('/message', (req, res) => {
+app.get('/message', async (req, res) => {
     const { clientId, to, message: text } = req.query;
+
     if (!clientId || !to || !text) {
         return res.status(400).json({ error: 'clientId, number, and message are required' });
     }
 
     const client = activeClients[clientId];
 
-    if (client && readyClients[clientId] && client.info && client.info.wid) {
-        const sanitized = to.replace(/\D/g, '');
-        const chatId = `${sanitized}@c.us`;
+    if (!client || !readyClients[clientId]) {
+        return res.status(404).json({ error: `Client ${clientId} not ready` });
+    }
 
-        client.sendMessage(chatId, text).then(() => {
-            insertIfNotExists('message_logs', {
-                clientId,
-                number: to,
-                message: text
-            }, {
-                clientId,
-                number: to,
-                message: text
-            });
+    try {
+        const sanitized = to.replace(/\D/g, '') + '@c.us';
 
-            res.status(200).json({ message: `Message sent to ${to} by client ${clientId}` });
-        }).catch(err => {
-            console.error(`Send error to ${chatId}:`, err);
-            res.status(500).json({ error: 'Failed to send message', detail: err.message });
+        // Check if the chat exists (optional but safer)
+        const chat = await client.getChatById(sanitized);
+
+        await client.sendMessage(chat.id._serialized, text);
+
+        insertIfNotExists('message_logs', {
+            clientId,
+            number: to,
+            message: text
+        }, {
+            clientId,
+            number: to,
+            message: text
         });
-    } else {
-        return res.status(404).json({ error: `Client ${clientId} not ready or initialized` });
+
+        res.status(200).json({ message: `Message sent to ${to}` });
+    } catch (error) {
+        console.error(`Failed to send message:`, error);
+        res.status(500).json({ error: 'Failed to send message', detail: error.message });
     }
 });
+
 
 app.get('/set-status', async (req, res) => {
     const { clientId, statusMessage } = req.query;
