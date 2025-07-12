@@ -1,14 +1,16 @@
 require('dotenv').config();
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { Client, LocalAuth, MessageMedia, Location } = require('whatsapp-web.js');
 const express = require('express');
 const bodyParser = require('body-parser');
 const qr = require('qr-image');
 const cors = require('cors');
 const fs = require('fs');
-const mysql = require('mysql2');
 const path = require('path');
+const mysql = require('mysql2');
+const multer = require('multer');
+const mime = require('mime-types');
+const upload = multer({ dest: 'uploads/' });
 
 const app = express();
 const port = process.env.PORT || 781;
@@ -20,7 +22,7 @@ const db = mysql.createConnection({
     database: process.env.DB_NAME
 });
 
-db.connect((err) => {
+db.connect(err => {
     if (err) {
         console.error('Error connecting to MySQL:', err.stack);
         return;
@@ -32,7 +34,7 @@ app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(bodyParser.json());
 
 const activeClients = {};
-const readyClients = {}; // Track clients that are fully ready
+const readyClients = {};
 
 const insertIfNotExists = (table, conditions, values) => {
     const conditionString = Object.keys(conditions).map(key => `${key} = ?`).join(' AND ');
@@ -69,7 +71,7 @@ app.get('/initialize-client', async (req, res) => {
             puppeteer: {
                 headless: true,
                 timeout: 120000,
-                args: ["--no-sandbox", '--proxy-server=46.166.137.38:31499']
+                args: ["--no-sandbox"]
             }
         });
 
@@ -110,7 +112,7 @@ app.get('/initialize-client', async (req, res) => {
                     };
                     insertIfNotExists('contacts', data, data);
                 });
-            }).catch(err => console.error('Contacts error:', err));
+            });
 
             client.getChats().then(chats => {
                 chats.forEach(chat => {
@@ -122,7 +124,7 @@ app.get('/initialize-client', async (req, res) => {
                     };
                     insertIfNotExists('chats', data, data);
                 });
-            }).catch(err => console.error('Chats error:', err));
+            });
 
             const phoneNumber = client.info?.wid?.user || null;
             if (phoneNumber) {
@@ -134,27 +136,13 @@ app.get('/initialize-client', async (req, res) => {
             }
         });
 
-        client.on('authenticated', () => {
-            console.log(`${clientId} authenticated`);
-        });
-
-        client.on('auth_failure', message => {
-            console.error('Authentication failed:', message);
-        });
-
+        client.on('authenticated', () => console.log(`${clientId} authenticated`));
+        client.on('auth_failure', msg => console.error('Auth failed:', msg));
         client.on('disconnected', reason => {
             console.warn(`Client ${clientId} disconnected: ${reason}`);
             delete activeClients[clientId];
             delete readyClients[clientId];
-
-            db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId], (err) => {
-                if (err) console.error('MySQL update error on disconnect:', err.stack);
-                else console.log('Client status set to logged_out in DB');
-            });
-        });
-
-        client.on('change_state', state => {
-            console.log(`Client ${clientId} state changed: ${state}`);
+            db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId]);
         });
 
     } catch (error) {
@@ -181,52 +169,79 @@ app.get('/message', async (req, res) => {
     }
 
     const client = activeClients[clientId];
-
     if (!client || !readyClients[clientId]) {
         return res.status(404).json({ error: `Client ${clientId} not ready` });
     }
 
-    const sanitized = to.replace(/\D/g, '') + '@c.us';
-
     try {
-        await client.sendMessage(sanitized, text);
+        const sanitized = to.replace(/\D/g, '');
+        const numberId = await client.getNumberId(sanitized);
+        if (!numberId) {
+            return res.status(404).json({ error: `The number ${sanitized} is not registered on WhatsApp` });
+        }
+
+        await client.sendMessage(numberId._serialized, text);
+
+        insertIfNotExists('message_logs', {
+            clientId,
+            number: to,
+            message: text
+        }, {
+            clientId,
+            number: to,
+            message: text
+        });
+
+        res.status(200).json({ message: `Message sent successfully to ${to}` });
+
     } catch (error) {
-        console.error(`Error sending message to ${to}: ${error.message}`);
-        // Silent catch — no error sent to user
+        console.error(`Error sending message to ${to}:`, error.message);
+        res.status(500).json({ error: 'Internal server error' });
     }
-
-    insertIfNotExists('message_logs', {
-        clientId,
-        number: to,
-        message: text
-    }, {
-        clientId,
-        number: to,
-        message: text
-    });
-
-    res.status(200).json({ message: `Message sent successfully to ${to}` });
 });
 
+app.post('/send-media-upload', upload.single('file'), async (req, res) => {
+    const { clientId, to } = req.body;
+    const file = req.file;
 
-
-app.get('/set-status', async (req, res) => {
-    const { clientId, statusMessage } = req.query;
-    if (!clientId || !statusMessage) {
-        return res.status(400).json({ error: 'clientId and statusMessage are required' });
+    if (!clientId || !to || !file) {
+        return res.status(400).json({ error: 'clientId, to, and file are required' });
     }
 
     const client = activeClients[clientId];
-    if (client && readyClients[clientId]) {
-        try {
-            await client.setStatus(statusMessage);
-            res.status(200).json({ message: `Status set to "${statusMessage}" for client ${clientId}` });
-        } catch (error) {
-            console.error('Error setting status:', error);
-            res.status(500).json({ error: 'Failed to set status' });
+    if (!client || !readyClients[clientId]) {
+        return res.status(404).json({ error: `Client ${clientId} not ready` });
+    }
+
+    try {
+        const sanitized = to.replace(/\D/g, '');
+        const numberId = await client.getNumberId(sanitized);
+        if (!numberId) {
+            return res.status(404).json({ error: `The number ${sanitized} is not registered on WhatsApp` });
         }
-    } else {
-        res.status(404).json({ error: `Client ${clientId} not found or not ready` });
+
+        const mimetype = mime.lookup(file.originalname) || file.mimetype;
+        const base64 = fs.readFileSync(file.path, { encoding: 'base64' });
+        const media = new MessageMedia(mimetype, base64, file.originalname);
+
+        await client.sendMessage(numberId._serialized, media);
+        fs.unlinkSync(file.path);
+
+        insertIfNotExists('message_logs', {
+            clientId,
+            number: to,
+            message: `[MEDIA_UPLOAD] ${file.originalname}`
+        }, {
+            clientId,
+            number: to,
+            message: `[MEDIA_UPLOAD] ${file.originalname}`
+        });
+
+        res.status(200).json({ message: `Media sent to ${to}` });
+
+    } catch (err) {
+        console.error('Error sending uploaded media:', err.message);
+        res.status(500).json({ error: 'Failed to send uploaded media' });
     }
 });
 
@@ -243,7 +258,6 @@ app.get('/logout', async (req, res) => {
 
             db.query('UPDATE clients SET status = "logged_out" WHERE clientId = ?', [clientId], (err) => {
                 if (err) console.error('MySQL update error:', err.stack);
-                else console.log(`Client ${clientId} status updated to logged_out`);
             });
 
             res.status(200).json({ message: `Client ${clientId} logged out` });
@@ -257,5 +271,5 @@ app.get('/logout', async (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`Server running on http://207.244.239.151:${port}`);
+    console.log(`Server running on http://localhost:${port}`);
 });
