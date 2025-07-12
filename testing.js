@@ -180,28 +180,39 @@ app.get('/message', async (req, res) => {
             return res.status(404).json({ error: `The number ${sanitized} is not registered on WhatsApp` });
         }
 
+        // ✅ Attempt to send message
         await client.sendMessage(numberId._serialized, text);
+        console.log(`✅ Message sent to ${numberId._serialized}`);
 
-        insertIfNotExists('message_logs', {
-            clientId,
-            number: to,
-            message: text
-        }, {
-            clientId,
-            number: to,
-            message: text
-        });
+        // ✅ Try logging separately (non-blocking)
+        try {
+            insertIfNotExists('message_logs', {
+                clientId,
+                number: to,
+                message: text
+            }, {
+                clientId,
+                number: to,
+                message: text
+            });
+        } catch (logErr) {
+            console.warn('⚠️ Warning: Failed to log message. Not blocking response.');
+            console.warn(logErr);
+        }
 
+        // ✅ Respond with success
         res.status(200).json({ message: `Message sent successfully to ${to}` });
 
     } catch (error) {
-        console.error(`Error sending message to ${to}:`, error.message);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('❌ ERROR sending message:', error.message);
+        console.error(error.stack);
+        res.status(500).json({ error: 'Internal server error while sending message' });
     }
 });
 
+
 app.post('/send-media-upload', upload.single('file'), async (req, res) => {
-    const { clientId, to } = req.body;
+    const { clientId, to, caption } = req.body;
     const file = req.file;
 
     if (!clientId || !to || !file) {
@@ -224,26 +235,44 @@ app.post('/send-media-upload', upload.single('file'), async (req, res) => {
         const base64 = fs.readFileSync(file.path, { encoding: 'base64' });
         const media = new MessageMedia(mimetype, base64, file.originalname);
 
-        await client.sendMessage(numberId._serialized, media);
+        // ✅ Send media (with optional caption)
+        await client.sendMessage(numberId._serialized, media, {
+            caption: caption || undefined
+        });
+
+        console.log(`✅ Media sent to ${numberId._serialized}`);
+
+        // ✅ Cleanup file
         fs.unlinkSync(file.path);
 
-        insertIfNotExists('message_logs', {
-            clientId,
-            number: to,
-            message: `[MEDIA_UPLOAD] ${file.originalname}`
-        }, {
-            clientId,
-            number: to,
-            message: `[MEDIA_UPLOAD] ${file.originalname}`
-        });
+        // ✅ Log separately
+        try {
+            insertIfNotExists('message_logs', {
+                clientId,
+                number: to,
+                message: `[MEDIA_UPLOAD] ${file.originalname}`
+            }, {
+                clientId,
+                number: to,
+                message: `[MEDIA_UPLOAD] ${file.originalname}`
+            });
+        } catch (logErr) {
+            console.warn('⚠️ Warning: Failed to log media message');
+            console.warn(logErr);
+        }
 
         res.status(200).json({ message: `Media sent to ${to}` });
 
     } catch (err) {
-        console.error('Error sending uploaded media:', err.message);
+        console.error('❌ ERROR sending media:', err.message);
+        console.error(err.stack);
         res.status(500).json({ error: 'Failed to send uploaded media' });
+
+        // Cleanup file on error too
+        if (fs.existsSync(file?.path)) fs.unlinkSync(file.path);
     }
 });
+
 
 app.get('/logout', async (req, res) => {
     const { clientId } = req.query;
